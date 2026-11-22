@@ -1,0 +1,258 @@
+package damonfs
+
+import (
+	"fmt"
+	"path"
+	"slices"
+	"strconv"
+	"strings"
+)
+
+type (
+	State string
+
+	Kdamond struct {
+		fs  *FS
+		idx int
+		dir string
+	}
+
+	SchemeStats struct {
+		NrTried, SzTried     uint64
+		NrApplied, SzApplied uint64
+		QtExceeds            uint64
+	}
+
+	Features struct {
+		Operations          []string
+		SchemeApplyInterval bool
+		TriedBytes          bool
+		IntervalsAutoTuning bool
+	}
+)
+
+const (
+	StateOn  State = "on"
+	StateOff State = "off"
+)
+
+func (k *Kdamond) Index() int { return k.idx }
+
+func (k *Kdamond) ctxDir() string { return path.Join(k.dir, "contexts", "0") }
+
+func (k *Kdamond) schemeDir(i int) string {
+	return path.Join(k.ctxDir(), "schemes", strconv.Itoa(i))
+}
+
+func (k *Kdamond) State() (State, error) {
+	s, err := k.fs.read(k.dir + "/state")
+	return State(s), err
+}
+
+func (k *Kdamond) Running() (bool, error) {
+	s, err := k.State()
+	return s == StateOn, err
+}
+
+func (k *Kdamond) PID() (int, error) {
+	s, err := k.fs.read(k.dir + "/pid")
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(s)
+}
+
+func (k *Kdamond) Start() error { return k.command("on") }
+
+func (k *Kdamond) Stop() error { return k.command("off") }
+
+func (k *Kdamond) Commit() error { return k.command("commit") }
+
+func (k *Kdamond) UpdateSchemesStats() error { return k.command("update_schemes_stats") }
+
+func (k *Kdamond) UpdateTriedRegions() error { return k.command("update_schemes_tried_regions") }
+
+func (k *Kdamond) UpdateTriedBytes() error { return k.command("update_schemes_tried_bytes") }
+
+func (k *Kdamond) ClearTriedRegions() error { return k.command("clear_schemes_tried_regions") }
+
+func (k *Kdamond) command(cmd string) error { return k.fs.write(k.dir+"/state", cmd) }
+
+func (k *Kdamond) AvailableOperations() ([]string, error) {
+	name := k.ctxDir() + "/avail_operations"
+	if !k.fs.b.Exists(name) {
+		return nil, nil
+	}
+	s, err := k.fs.read(name)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(s), nil
+}
+
+func (k *Kdamond) Configure(c Context) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	running, err := k.Running()
+	if err != nil {
+		return err
+	}
+	if running {
+		return fmt.Errorf("damonfs: configure kdamond %d: %w (use UpdateTargets for online changes)", k.idx, ErrRunning)
+	}
+
+	if err := k.fs.writeUint(k.dir+"/contexts/nr_contexts", 1); err != nil {
+		return err
+	}
+	avail, err := k.AvailableOperations()
+	if err != nil {
+		return err
+	}
+	if avail != nil && !slices.Contains(avail, string(c.Operations)) {
+		return fmt.Errorf("%w: operations %q (kernel offers %v)", ErrUnsupportedFeature, c.Operations, avail)
+	}
+
+	ctx := k.ctxDir()
+	iv := ctx + "/monitoring_attrs/intervals/"
+	nr := ctx + "/monitoring_attrs/nr_regions/"
+	writes := []struct {
+		name string
+		val  uint64
+	}{
+		{iv + "sample_us", micros(c.Intervals.Sample)},
+		{iv + "aggr_us", micros(c.Intervals.Aggr)},
+		{iv + "update_us", micros(c.Intervals.Update)},
+		{nr + "min", c.NrRegions.Min},
+		{nr + "max", c.NrRegions.Max},
+	}
+	if err := k.fs.write(ctx+"/operations", string(c.Operations)); err != nil {
+		return err
+	}
+	for _, w := range writes {
+		if err := k.fs.writeUint(w.name, w.val); err != nil {
+			return err
+		}
+	}
+	if err := k.writeTargets(c.Targets); err != nil {
+		return err
+	}
+	if err := k.fs.writeUint(ctx+"/schemes/nr_schemes", uint64(len(c.Schemes))); err != nil {
+		return err
+	}
+	for i, s := range c.Schemes {
+		if err := k.writeScheme(i, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (k *Kdamond) UpdateTargets(ts []Target) error {
+	ops, err := k.fs.read(k.ctxDir() + "/operations")
+	if err != nil {
+		return err
+	}
+	if err := validateTargets(Operations(ops), ts); err != nil {
+		return err
+	}
+	if err := k.writeTargets(ts); err != nil {
+		return err
+	}
+	running, err := k.Running()
+	if err != nil {
+		return err
+	}
+	if running {
+		return k.Commit()
+	}
+	return nil
+}
+
+func (k *Kdamond) writeTargets(ts []Target) error {
+	dir := k.ctxDir() + "/targets"
+	if err := k.fs.writeUint(dir+"/nr_targets", uint64(len(ts))); err != nil {
+		return err
+	}
+	for i, t := range ts {
+		if t.PID <= 0 {
+			continue
+		}
+		if err := k.fs.writeUint(path.Join(dir, strconv.Itoa(i), "pid_target"), uint64(t.PID)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (k *Kdamond) writeScheme(i int, s Scheme) error {
+	dir := k.schemeDir(i)
+	if err := k.fs.write(dir+"/action", string(s.Action)); err != nil {
+		return err
+	}
+	ap := s.AccessPattern
+	for _, r := range []struct {
+		name string
+		rng  Range
+	}{{"sz", ap.Size}, {"nr_accesses", ap.NrAccesses}, {"age", ap.Age}} {
+		base := path.Join(dir, "access_pattern", r.name)
+		if err := k.fs.writeUint(base+"/min", r.rng.Min); err != nil {
+			return err
+		}
+		if err := k.fs.writeUint(base+"/max", r.rng.Max); err != nil {
+			return err
+		}
+	}
+	if s.ApplyInterval > 0 {
+		name := dir + "/apply_interval_us"
+		if !k.fs.b.Exists(name) {
+			return fmt.Errorf("%w: scheme apply interval", ErrUnsupportedFeature)
+		}
+		if err := k.fs.writeUint(name, micros(s.ApplyInterval)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (k *Kdamond) SchemeStats(i int) (SchemeStats, error) {
+	dir := k.schemeDir(i) + "/stats/"
+	var st SchemeStats
+	for _, f := range []struct {
+		name string
+		dst  *uint64
+	}{
+		{"nr_tried", &st.NrTried}, {"sz_tried", &st.SzTried},
+		{"nr_applied", &st.NrApplied}, {"sz_applied", &st.SzApplied},
+		{"qt_exceeds", &st.QtExceeds},
+	} {
+		v, err := k.fs.readUint(dir + f.name)
+		if err != nil {
+			return SchemeStats{}, err
+		}
+		*f.dst = v
+	}
+	return st, nil
+}
+
+func (k *Kdamond) Features() (Features, error) {
+	nc, err := k.fs.readUint(k.dir + "/contexts/nr_contexts")
+	if err != nil {
+		return Features{}, err
+	}
+	if nc == 0 {
+		return Features{}, fmt.Errorf("damonfs: kdamond %d has no context; call Configure first", k.idx)
+	}
+	ops, err := k.AvailableOperations()
+	if err != nil {
+		return Features{}, err
+	}
+	b := k.fs.b
+	s0 := k.schemeDir(0)
+	return Features{
+		Operations:          ops,
+		SchemeApplyInterval: b.Exists(s0 + "/apply_interval_us"),
+		TriedBytes:          b.Exists(s0 + "/tried_regions/total_bytes"),
+		IntervalsAutoTuning: b.Exists(k.ctxDir() + "/monitoring_attrs/intervals/intervals_goal"),
+	}, nil
+}

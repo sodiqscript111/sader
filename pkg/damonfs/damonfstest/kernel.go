@@ -1,0 +1,388 @@
+package damonfstest
+
+import (
+	"io/fs"
+	"path"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+
+	"damon-wss-exporter/pkg/damonfs"
+)
+
+type (
+	Kernel struct {
+		mu      sync.Mutex
+		files   map[string]string
+		dirs    map[string]bool
+		regions map[int][]damonfs.Region
+		commits map[int]int
+		omit    []string
+		nextPID int
+	}
+
+	kv struct{ name, val string }
+)
+
+var _ damonfs.Backend = (*Kernel)(nil)
+
+func New() *Kernel {
+	k := &Kernel{
+		files:   map[string]string{},
+		dirs:    map[string]bool{".": true},
+		regions: map[int][]damonfs.Region{},
+		commits: map[int]int{},
+		nextPID: 4000,
+	}
+	k.addFile("kdamonds/nr_kdamonds", "0")
+	return k
+}
+
+func (k *Kernel) Without(names ...string) *Kernel {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.omit = append(k.omit, names...)
+	return k
+}
+
+func (k *Kernel) omitted(rel string) bool {
+	for _, o := range k.omit {
+		if rel == o || strings.HasPrefix(rel, o+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func (k *Kernel) SetRegions(i int, regions []damonfs.Region) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.regions[i] = slices.Clone(regions)
+}
+
+func (k *Kernel) File(name string) (string, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	v, ok := k.files[name]
+	return v, ok
+}
+
+func (k *Kernel) RemoveFile(name string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.files, name)
+	delete(k.dirs, name)
+}
+
+func (k *Kernel) Commits(i int) int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.commits[i]
+}
+
+func (k *Kernel) ReadFile(name string) ([]byte, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	v, ok := k.files[name]
+	if !ok {
+		return nil, pathErr("open", name, fs.ErrNotExist)
+	}
+	return []byte(v + "\n"), nil
+}
+
+func (k *Kernel) ReadDir(name string) ([]string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.dirs[name] {
+		return nil, pathErr("open", name, fs.ErrNotExist)
+	}
+	set := map[string]bool{}
+	for _, m := range []map[string]bool{k.dirs, keys(k.files)} {
+		for p := range m {
+			if p != name && path.Dir(p) == name {
+				set[path.Base(p)] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for n := range set {
+		out = append(out, n)
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+func (k *Kernel) Exists(name string) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	_, ok := k.files[name]
+	return ok || k.dirs[name]
+}
+
+func (k *Kernel) WriteFile(name string, data []byte) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.files[name]; !ok {
+		return pathErr("open", name, fs.ErrNotExist)
+	}
+	if readOnly(name) {
+		return pathErr("open", name, syscall.EACCES)
+	}
+	val := strings.TrimSpace(string(data))
+	base := path.Base(name)
+
+	if numeric(base) {
+		if _, err := strconv.ParseUint(val, 10, 64); err != nil {
+			return pathErr("write", name, syscall.EINVAL)
+		}
+	}
+	switch {
+	case base == "state":
+		return k.command(name, val)
+	case strings.HasPrefix(base, "nr_"):
+		return k.resize(name, val)
+	case base == "operations":
+		avail := strings.Fields(k.files[path.Dir(name)+"/avail_operations"])
+		if !slices.Contains(avail, val) {
+			return pathErr("write", name, syscall.EINVAL)
+		}
+	case base == "action":
+		if !slices.Contains(actions, val) {
+			return pathErr("write", name, syscall.EINVAL)
+		}
+	}
+	k.files[name] = val
+	return nil
+}
+
+var actions = []string{"willneed", "cold", "pageout", "hugepage", "nohugepage", "lru_prio", "lru_deprio", "migrate_hot", "migrate_cold", "stat"}
+
+func numeric(base string) bool {
+	switch base {
+	case "min", "max", "sample_us", "aggr_us", "update_us", "pid_target", "start", "end",
+		"apply_interval_us", "ms", "bytes", "reset_interval_ms":
+		return true
+	}
+	return strings.HasPrefix(base, "nr_")
+}
+
+func readOnly(name string) bool {
+	base := path.Base(name)
+	return base == "pid" || base == "avail_operations" ||
+		strings.Contains(name, "/stats/") || strings.Contains(name, "/tried_regions/")
+}
+
+var templates = map[string][]kv{
+	"nr_kdamonds": {{"state", "off"}, {"pid", "-1"}, {"contexts/nr_contexts", "0"}},
+	"nr_contexts": {
+		{"avail_operations", "fvaddr paddr vaddr"},
+		{"operations", "vaddr"},
+		{"monitoring_attrs/intervals/sample_us", "5000"},
+		{"monitoring_attrs/intervals/aggr_us", "100000"},
+		{"monitoring_attrs/intervals/update_us", "1000000"},
+		{"monitoring_attrs/intervals/intervals_goal/access_bp", "0"},
+		{"monitoring_attrs/nr_regions/min", "10"},
+		{"monitoring_attrs/nr_regions/max", "1000"},
+		{"targets/nr_targets", "0"},
+		{"schemes/nr_schemes", "0"},
+	},
+	"nr_targets": {{"pid_target", "0"}, {"regions/nr_regions", "0"}},
+	"nr_regions": {{"start", "0"}, {"end", "0"}},
+	"nr_schemes": {
+		{"action", "stat"},
+		{"apply_interval_us", "0"},
+		{"access_pattern/sz/min", "0"}, {"access_pattern/sz/max", "0"},
+		{"access_pattern/nr_accesses/min", "0"}, {"access_pattern/nr_accesses/max", "0"},
+		{"access_pattern/age/min", "0"}, {"access_pattern/age/max", "0"},
+		{"quotas/ms", "0"}, {"quotas/bytes", "0"}, {"quotas/reset_interval_ms", "0"},
+		{"watermarks/metric", "none"},
+		{"filters/nr_filters", "0"},
+		{"stats/nr_tried", "0"}, {"stats/sz_tried", "0"},
+		{"stats/nr_applied", "0"}, {"stats/sz_applied", "0"},
+		{"stats/qt_exceeds", "0"},
+		{"tried_regions/total_bytes", "0"},
+	},
+}
+
+func (k *Kernel) resize(name, val string) error {
+	n, _ := strconv.Atoi(val)
+	base, parent := path.Base(name), path.Dir(name)
+	switch base {
+	case "nr_kdamonds":
+		for i := range k.count("kdamonds/nr_kdamonds") {
+			if k.files["kdamonds/"+strconv.Itoa(i)+"/state"] == "on" {
+				return pathErr("write", name, syscall.EBUSY)
+			}
+		}
+	case "nr_contexts":
+		if n > 1 {
+			return pathErr("write", name, syscall.EINVAL)
+		}
+	}
+	k.removeChildren(parent)
+	k.files[name] = val
+	for i := range n {
+		dir := path.Join(parent, strconv.Itoa(i))
+		k.dirs[dir] = true
+		for _, f := range templates[base] {
+			if k.omitted(f.name) {
+				continue
+			}
+			k.addFile(path.Join(dir, f.name), f.val)
+		}
+	}
+	return nil
+}
+
+func (k *Kernel) command(name, cmd string) error {
+	kdir := path.Dir(name)
+	idx, _ := strconv.Atoi(path.Base(kdir))
+	running := k.files[name] == "on"
+	switch cmd {
+	case "on":
+		if running {
+			return pathErr("write", name, syscall.EBUSY)
+		}
+		if !k.startable(kdir) {
+			return pathErr("write", name, syscall.EINVAL)
+		}
+		k.files[name] = "on"
+		k.files[kdir+"/pid"] = strconv.Itoa(k.nextPID)
+		k.nextPID++
+		return nil
+	case "off", "commit", "update_schemes_stats", "update_schemes_tried_regions",
+		"update_schemes_tried_bytes", "clear_schemes_tried_regions":
+		if !running {
+			return pathErr("write", name, syscall.EINVAL)
+		}
+	default:
+		return pathErr("write", name, syscall.EINVAL)
+	}
+
+	ctx := kdir + "/contexts/0"
+	switch cmd {
+	case "off":
+		k.files[name] = "off"
+		k.files[kdir+"/pid"] = "-1"
+	case "commit":
+		k.commits[idx]++
+	default:
+		for s := range k.count(ctx + "/schemes/nr_schemes") {
+			k.applyScheme(idx, path.Join(ctx, "schemes", strconv.Itoa(s)), cmd)
+		}
+	}
+	return nil
+}
+
+func (k *Kernel) startable(kdir string) bool {
+	if k.files[kdir+"/contexts/nr_contexts"] != "1" {
+		return false
+	}
+	ctx := kdir + "/contexts/0"
+	nt := k.count(ctx + "/targets/nr_targets")
+	if nt == 0 {
+		return false
+	}
+	if ops := k.files[ctx+"/operations"]; ops == "vaddr" || ops == "fvaddr" {
+		for i := range nt {
+			if k.files[ctx+"/targets/"+strconv.Itoa(i)+"/pid_target"] == "0" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (k *Kernel) applyScheme(idx int, sdir, cmd string) {
+	var matched []damonfs.Region
+	for _, r := range k.regions[idx] {
+		if k.inRange(sdir, "sz", r.Size()) && k.inRange(sdir, "nr_accesses", r.NrAccesses) && k.inRange(sdir, "age", r.Age) {
+			matched = append(matched, r)
+		}
+	}
+	var total uint64
+	for _, r := range matched {
+		total += r.Size()
+	}
+	td := sdir + "/tried_regions"
+	switch cmd {
+	case "update_schemes_tried_regions":
+		k.removeChildren(td)
+		for i, r := range matched {
+			rd := path.Join(td, strconv.Itoa(i))
+			k.dirs[rd] = true
+			k.addFile(rd+"/start", u(r.Start))
+			k.addFile(rd+"/end", u(r.End))
+			k.addFile(rd+"/nr_accesses", u(r.NrAccesses))
+			k.addFile(rd+"/age", u(r.Age))
+			k.addFile(rd+"/sz_filter_passed", "0")
+		}
+		k.files[td+"/total_bytes"] = u(total)
+	case "update_schemes_tried_bytes":
+		if _, ok := k.files[td+"/total_bytes"]; ok {
+			k.files[td+"/total_bytes"] = u(total)
+		}
+	case "clear_schemes_tried_regions":
+		k.removeChildren(td)
+		k.files[td+"/total_bytes"] = "0"
+	case "update_schemes_stats":
+
+		k.files[sdir+"/stats/nr_tried"] = u(k.uint(sdir+"/stats/nr_tried") + uint64(len(matched)))
+		k.files[sdir+"/stats/sz_tried"] = u(k.uint(sdir+"/stats/sz_tried") + total)
+	}
+}
+
+func (k *Kernel) inRange(sdir, field string, v uint64) bool {
+	base := path.Join(sdir, "access_pattern", field)
+	return v >= k.uint(base+"/min") && v <= k.uint(base+"/max")
+}
+
+func (k *Kernel) uint(name string) uint64 {
+	v, _ := strconv.ParseUint(k.files[name], 10, 64)
+	return v
+}
+
+func (k *Kernel) count(name string) int { return int(k.uint(name)) }
+
+func (k *Kernel) removeChildren(dir string) {
+	numbered := func(p string) bool {
+		rel, ok := strings.CutPrefix(p, dir+"/")
+		if !ok {
+			return false
+		}
+		first, _, _ := strings.Cut(rel, "/")
+		_, err := strconv.Atoi(first)
+		return err == nil
+	}
+	for p := range k.files {
+		if numbered(p) {
+			delete(k.files, p)
+		}
+	}
+	for p := range k.dirs {
+		if numbered(p) {
+			delete(k.dirs, p)
+		}
+	}
+}
+
+func (k *Kernel) addFile(name, val string) {
+	k.files[name] = val
+	for d := path.Dir(name); d != "." && !k.dirs[d]; d = path.Dir(d) {
+		k.dirs[d] = true
+	}
+}
+
+func keys(m map[string]string) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for p := range m {
+		out[p] = true
+	}
+	return out
+}
+
+func u(v uint64) string { return strconv.FormatUint(v, 10) }
+
+func pathErr(op, name string, err error) error { return &fs.PathError{Op: op, Path: name, Err: err} }
