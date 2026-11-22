@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"damon-wss-exporter/pkg/damonfs"
-	"damon-wss-exporter/pkg/damonfs/damonfstest"
+	"github.com/sodiqscript111/sader/pkg/damonfs"
+	"github.com/sodiqscript111/sader/pkg/damonfs/damonfstest"
 )
 
 const mib = 1 << 20

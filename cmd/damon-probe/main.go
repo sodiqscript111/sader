@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"damon-wss-exporter/pkg/damonfs"
+	"github.com/sodiqscript111/sader/pkg/damonfs"
 )
 
 func main() {
