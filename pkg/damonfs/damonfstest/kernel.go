@@ -17,9 +17,11 @@ type (
 		mu      sync.Mutex
 		files   map[string]string
 		dirs    map[string]bool
+		kids    map[string]map[string]bool
 		regions map[int][]damonfs.Region
 		memory  map[int][]Chunk
 		commits map[int]int
+		reads   int
 		omit    []string
 		nextPID int
 	}
@@ -49,6 +51,7 @@ func New() *Kernel {
 	k := &Kernel{
 		files:   map[string]string{},
 		dirs:    map[string]bool{".": true},
+		kids:    map[string]map[string]bool{},
 		regions: map[int][]damonfs.Region{},
 		memory:  map[int][]Chunk{},
 		commits: map[int]int{},
@@ -96,8 +99,7 @@ func (k *Kernel) File(name string) (string, bool) {
 func (k *Kernel) RemoveFile(name string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	delete(k.files, name)
-	delete(k.dirs, name)
+	k.removePath(name)
 }
 
 func (k *Kernel) Commits(i int) int {
@@ -106,9 +108,16 @@ func (k *Kernel) Commits(i int) int {
 	return k.commits[i]
 }
 
+func (k *Kernel) Reads() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.reads
+}
+
 func (k *Kernel) ReadFile(name string) ([]byte, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	k.reads++
 	v, ok := k.files[name]
 	if !ok {
 		return nil, pathErr("open", name, fs.ErrNotExist)
@@ -122,16 +131,8 @@ func (k *Kernel) ReadDir(name string) ([]string, error) {
 	if !k.dirs[name] {
 		return nil, pathErr("open", name, fs.ErrNotExist)
 	}
-	set := map[string]bool{}
-	for _, m := range []map[string]bool{k.dirs, keys(k.files)} {
-		for p := range m {
-			if p != name && path.Dir(p) == name {
-				set[path.Base(p)] = true
-			}
-		}
-	}
-	out := make([]string, 0, len(set))
-	for n := range set {
+	out := make([]string, 0, len(k.kids[name]))
+	for n := range k.kids[name] {
 		out = append(out, n)
 	}
 	slices.Sort(out)
@@ -269,7 +270,7 @@ func (k *Kernel) resize(name, val string) error {
 	k.files[name] = val
 	for i := range n {
 		dir := path.Join(parent, strconv.Itoa(i))
-		k.dirs[dir] = true
+		k.addDir(dir)
 		for _, f := range templates[base] {
 			if k.omitted(f.name) {
 				continue
@@ -360,7 +361,7 @@ func (k *Kernel) applyScheme(idx int, sdir, cmd string) {
 		k.removeChildren(td)
 		for i, r := range matched {
 			rd := path.Join(td, strconv.Itoa(i))
-			k.dirs[rd] = true
+			k.addDir(rd)
 			k.addFile(rd+"/start", u(r.Start))
 			k.addFile(rd+"/end", u(r.End))
 			k.addFile(rd+"/nr_accesses", u(r.NrAccesses))
@@ -471,40 +472,46 @@ func (k *Kernel) uint(name string) uint64 {
 func (k *Kernel) count(name string) int { return int(k.uint(name)) }
 
 func (k *Kernel) removeChildren(dir string) {
-	numbered := func(p string) bool {
-		rel, ok := strings.CutPrefix(p, dir+"/")
-		if !ok {
-			return false
-		}
-		first, _, _ := strings.Cut(rel, "/")
-		_, err := strconv.Atoi(first)
-		return err == nil
-	}
-	for p := range k.files {
-		if numbered(p) {
-			delete(k.files, p)
+	for c := range k.kids[dir] {
+		if _, err := strconv.Atoi(c); err == nil {
+			k.removePath(dir + "/" + c)
 		}
 	}
-	for p := range k.dirs {
-		if numbered(p) {
-			delete(k.dirs, p)
-		}
+}
+
+func (k *Kernel) removePath(p string) {
+	for c := range k.kids[p] {
+		k.removePath(p + "/" + c)
 	}
+	delete(k.kids, p)
+	delete(k.files, p)
+	delete(k.dirs, p)
+	delete(k.kids[path.Dir(p)], path.Base(p))
+}
+
+func (k *Kernel) addDir(d string) {
+	k.dirs[d] = true
+	k.link(d)
 }
 
 func (k *Kernel) addFile(name, val string) {
 	k.files[name] = val
-	for d := path.Dir(name); d != "." && !k.dirs[d]; d = path.Dir(d) {
-		k.dirs[d] = true
-	}
+	k.link(name)
 }
 
-func keys(m map[string]string) map[string]bool {
-	out := make(map[string]bool, len(m))
-	for p := range m {
-		out[p] = true
+func (k *Kernel) link(p string) {
+	for p != "." {
+		parent, base := path.Dir(p), path.Base(p)
+		if k.kids[parent] == nil {
+			k.kids[parent] = map[string]bool{}
+		}
+		if k.kids[parent][base] {
+			return
+		}
+		k.kids[parent][base] = true
+		k.dirs[parent] = true
+		p = parent
 	}
-	return out
 }
 
 func u(v uint64) string { return strconv.FormatUint(v, 10) }

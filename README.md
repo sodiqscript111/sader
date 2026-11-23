@@ -25,6 +25,7 @@ yet.
 | `pkg/damonfs` | Typed wrapper over `/sys/kernel/mm/damon/admin`: slots, configuration, start/stop/commit, filters (both `core_filters`/`ops_filters` and legacy `filters` layouts), tried regions, stats, feature detection |
 | `pkg/damonfs/damonfstest` | In-memory fake kernel: reacts to writes like the kernel, and models memory ownership per cgroup so filter results can be tested on any OS |
 | `pkg/measure/cgroup` | Way 2 engine: one `paddr` watcher, one stat scheme per container, per-container bytes / hot bytes / 1m-5m-1h working set, optional page-level mode |
+| `pkg/schedule` | Adaptive checking: containers whose numbers stay flat are checked less and less often (10s, 20s, 40s ... up to 5 min); any real change snaps back to 10s. In a simulated 10 minutes with 40 containers (1 busy), this cut file reads 8x |
 | `cmd/damon-probe` | Smoke test for Way 1: detects DAMON, then prints one PID's working set every second |
 | `hack/memhog` | Validation workload: fills N MiB, keeps touching M MiB |
 | `hack/wsl-damon-kernel.sh` | Builds a WSL2 kernel with DAMON switched on |

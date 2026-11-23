@@ -2,13 +2,17 @@ package cgroup_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/sodiqscript111/sader/pkg/damonfs"
 	"github.com/sodiqscript111/sader/pkg/damonfs/damonfstest"
 	"github.com/sodiqscript111/sader/pkg/measure/cgroup"
+	"github.com/sodiqscript111/sader/pkg/schedule"
 )
+
+var t0 = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 const mib = 1 << 20
 
@@ -140,6 +144,112 @@ func TestMissingFilterPassedIsAnErrorNotZero(t *testing.T) {
 	got, err := m.Sample()
 	if !errors.Is(err, damonfs.ErrUnsupportedFeature) {
 		t.Fatalf("got %+v, %v; want ErrUnsupportedFeature instead of silent zeros", got, err)
+	}
+}
+
+func TestSampleIDsReadsOnlyThoseContainers(t *testing.T) {
+	k := damonfstest.New()
+	m := newMonitor(t, k, cgroup.DefaultConfig())
+	var cs []cgroup.Container
+	for i := range 40 {
+		cs = append(cs, cgroup.Container{ID: fmt.Sprintf("c%02d", i), MemcgPath: fmt.Sprintf("/c%02d", i)})
+	}
+	if err := m.Start(cs); err != nil {
+		t.Fatal(err)
+	}
+	var regions []damonfs.Region
+	for i := range 500 {
+		regions = append(regions, damonfs.Region{Start: uint64(i) * mib, End: uint64(i+1) * mib, NrAccesses: uint64(i % 2)})
+	}
+	k.SetRegions(0, regions)
+
+	before := k.Reads()
+	if _, err := m.Sample(); err != nil {
+		t.Fatal(err)
+	}
+	all := k.Reads() - before
+
+	before = k.Reads()
+	got, err := m.SampleIDs([]string{"c07"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := k.Reads() - before
+	if len(got) != 1 || got[0].ID != "c07" {
+		t.Fatalf("SampleIDs returned %+v", got)
+	}
+	t.Logf("file reads: all 40 containers = %d, one container = %d", all, one)
+	if one*30 > all {
+		t.Fatalf("sampling one container cost %d reads vs %d for all 40", one, all)
+	}
+	if _, err := m.SampleIDs([]string{"nope"}); err == nil {
+		t.Fatal("unknown container accepted")
+	}
+}
+
+func TestAdaptiveCheckingSavesReads(t *testing.T) {
+	k := damonfstest.New()
+	m := newMonitor(t, k, cgroup.DefaultConfig())
+	var cs []cgroup.Container
+	var ids []string
+	for i := range 40 {
+		id := fmt.Sprintf("c%02d", i)
+		ids = append(ids, id)
+		cs = append(cs, cgroup.Container{ID: id, MemcgPath: "/" + id})
+	}
+	if err := m.Start(cs); err != nil {
+		t.Fatal(err)
+	}
+	var regions []damonfs.Region
+	for i := range 400 {
+		regions = append(regions, damonfs.Region{Start: uint64(i) * mib, End: uint64(i+1) * mib, NrAccesses: 1})
+	}
+	k.SetRegions(0, regions)
+	memory := func(busyMiB uint64) {
+		chunks := []damonfstest.Chunk{{Start: 0, End: busyMiB * mib, Memcg: "/c00"}}
+		for i := 1; i < 40; i++ {
+			start := uint64(100+i*5) * mib
+			chunks = append(chunks, damonfstest.Chunk{Start: start, End: start + 5*mib, Memcg: fmt.Sprintf("/c%02d", i)})
+		}
+		k.SetMemory(0, chunks)
+	}
+
+	sched, err := schedule.New(schedule.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := k.Reads()
+	checks := map[string]int{}
+	for step := 0; step <= 60; step++ {
+		now := t0.Add(time.Duration(step) * 10 * time.Second)
+		memory([]uint64{50, 99}[step%2])
+		due := sched.Due(now, ids)
+		usages, err := m.SampleIDs(due)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, u := range usages {
+			checks[u.ID]++
+			sched.Observe(now, u.ID, u.Windows[time.Minute])
+		}
+	}
+	adaptive := k.Reads() - start
+
+	start = k.Reads()
+	for range 61 {
+		if _, err := m.Sample(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	everything := k.Reads() - start
+
+	t.Logf("10 simulated minutes, 40 containers: check-all = %d reads, adaptive = %d reads (busy checked %d times, a quiet one %d times)",
+		everything, adaptive, checks["c00"], checks["c01"])
+	if checks["c00"] != 61 {
+		t.Errorf("busy container checked %d times, want every time (61)", checks["c00"])
+	}
+	if adaptive*5 > everything {
+		t.Errorf("adaptive used %d reads vs %d: less than a 5x saving", adaptive, everything)
 	}
 }
 

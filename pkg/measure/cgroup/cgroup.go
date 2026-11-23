@@ -97,20 +97,37 @@ func (m *Monitor) Containers() []Container { return slices.Clone(m.containers) }
 func (m *Monitor) Stop() error { return m.kd.Stop() }
 
 func (m *Monitor) Sample() ([]Usage, error) {
-	if len(m.containers) == 0 {
+	ids := make([]string, len(m.containers))
+	for i, c := range m.containers {
+		ids[i] = c.ID
+	}
+	return m.SampleIDs(ids)
+}
+
+func (m *Monitor) SampleIDs(ids []string) ([]Usage, error) {
+	if len(ids) == 0 {
 		return nil, nil
+	}
+	index := make(map[string]int, len(m.containers))
+	for i, c := range m.containers {
+		index[c.ID] = i
+	}
+	for _, id := range ids {
+		if _, ok := index[id]; !ok {
+			return nil, fmt.Errorf("cgroup: unknown container %q", id)
+		}
 	}
 	if err := m.kd.UpdateTriedRegions(); err != nil {
 		return nil, err
 	}
 	aggr := m.cfg.Intervals.Aggr
-	out := make([]Usage, len(m.containers))
-	for i, c := range m.containers {
-		regions, err := m.kd.ReadFilteredTriedRegions(i)
+	out := make([]Usage, 0, len(ids))
+	for _, id := range ids {
+		regions, err := m.kd.ReadFilteredTriedRegions(index[id])
 		if err != nil {
-			return nil, fmt.Errorf("container %s: %w", c.ID, err)
+			return nil, fmt.Errorf("container %s: %w", id, err)
 		}
-		out[i] = m.usage(c.ID, regions, aggr)
+		out = append(out, m.usage(id, regions, aggr))
 	}
 	return out, nil
 }
