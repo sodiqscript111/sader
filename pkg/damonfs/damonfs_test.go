@@ -224,8 +224,10 @@ func TestSnapshotTriedRegions(t *testing.T) {
 		t.Fatalf("got %d regions, want %d", len(got), len(want))
 	}
 	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("region %d = %+v, want %+v", i, got[i], want[i])
+		w := want[i]
+		w.SzFilterPassed = w.Size()
+		if got[i] != w {
+			t.Errorf("region %d = %+v, want %+v", i, got[i], w)
 		}
 	}
 	if b := damonfs.TotalBytes(got); b != 12*mib {

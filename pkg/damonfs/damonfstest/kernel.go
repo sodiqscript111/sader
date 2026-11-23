@@ -18,12 +18,29 @@ type (
 		files   map[string]string
 		dirs    map[string]bool
 		regions map[int][]damonfs.Region
+		memory  map[int][]Chunk
 		commits map[int]int
 		omit    []string
 		nextPID int
 	}
 
 	kv struct{ name, val string }
+
+	Chunk struct {
+		Start, End uint64
+		Memcg      string
+		Young      bool
+	}
+
+	filterSpec struct {
+		typ      string
+		matching bool
+		allow    bool
+		hasAllow bool
+		memcg    string
+		start    uint64
+		end      uint64
+	}
 )
 
 var _ damonfs.Backend = (*Kernel)(nil)
@@ -33,6 +50,7 @@ func New() *Kernel {
 		files:   map[string]string{},
 		dirs:    map[string]bool{".": true},
 		regions: map[int][]damonfs.Region{},
+		memory:  map[int][]Chunk{},
 		commits: map[int]int{},
 		nextPID: 4000,
 	}
@@ -60,6 +78,12 @@ func (k *Kernel) SetRegions(i int, regions []damonfs.Region) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.regions[i] = slices.Clone(regions)
+}
+
+func (k *Kernel) SetMemory(i int, chunks []Chunk) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.memory[i] = slices.Clone(chunks)
 }
 
 func (k *Kernel) File(name string) (string, bool) {
@@ -152,17 +176,28 @@ func (k *Kernel) WriteFile(name string, data []byte) error {
 		if !slices.Contains(actions, val) {
 			return pathErr("write", name, syscall.EINVAL)
 		}
+	case base == "type":
+		if !slices.Contains(filterTypes, val) {
+			return pathErr("write", name, syscall.EINVAL)
+		}
+	case base == "matching" || base == "allow":
+		if val != "Y" && val != "N" {
+			return pathErr("write", name, syscall.EINVAL)
+		}
 	}
 	k.files[name] = val
 	return nil
 }
+
+var filterTypes = []string{"anon", "active", "memcg", "young", "hugepage_size", "unmapped", "addr", "target"}
 
 var actions = []string{"willneed", "cold", "pageout", "hugepage", "nohugepage", "lru_prio", "lru_deprio", "migrate_hot", "migrate_cold", "stat"}
 
 func numeric(base string) bool {
 	switch base {
 	case "min", "max", "sample_us", "aggr_us", "update_us", "pid_target", "start", "end",
-		"apply_interval_us", "ms", "bytes", "reset_interval_ms":
+		"apply_interval_us", "ms", "bytes", "reset_interval_ms",
+		"addr_start", "addr_end", "damon_target_idx", "target_idx":
 		return true
 	}
 	return strings.HasPrefix(base, "nr_")
@@ -198,11 +233,20 @@ var templates = map[string][]kv{
 		{"access_pattern/age/min", "0"}, {"access_pattern/age/max", "0"},
 		{"quotas/ms", "0"}, {"quotas/bytes", "0"}, {"quotas/reset_interval_ms", "0"},
 		{"watermarks/metric", "none"},
+		{"core_filters/nr_filters", "0"},
+		{"ops_filters/nr_filters", "0"},
 		{"filters/nr_filters", "0"},
 		{"stats/nr_tried", "0"}, {"stats/sz_tried", "0"},
 		{"stats/nr_applied", "0"}, {"stats/sz_applied", "0"},
 		{"stats/qt_exceeds", "0"},
+		{"stats/sz_ops_filter_passed", "0"},
+		{"stats/nr_snapshots", "0"},
 		{"tried_regions/total_bytes", "0"},
+	},
+	"nr_filters": {
+		{"type", "anon"}, {"matching", "N"}, {"allow", "N"},
+		{"memcg_path", ""}, {"addr_start", "0"}, {"addr_end", "0"},
+		{"min", "0"}, {"max", "0"}, {"damon_target_idx", "0"},
 	},
 }
 
@@ -302,9 +346,13 @@ func (k *Kernel) applyScheme(idx int, sdir, cmd string) {
 			matched = append(matched, r)
 		}
 	}
-	var total uint64
-	for _, r := range matched {
+	filters := k.filters(sdir)
+	passed := make([]uint64, len(matched))
+	var total, totalPassed uint64
+	for i, r := range matched {
 		total += r.Size()
+		passed[i] = k.passedBytes(idx, r, filters)
+		totalPassed += passed[i]
 	}
 	td := sdir + "/tried_regions"
 	switch cmd {
@@ -317,7 +365,7 @@ func (k *Kernel) applyScheme(idx int, sdir, cmd string) {
 			k.addFile(rd+"/end", u(r.End))
 			k.addFile(rd+"/nr_accesses", u(r.NrAccesses))
 			k.addFile(rd+"/age", u(r.Age))
-			k.addFile(rd+"/sz_filter_passed", "0")
+			k.addFile(rd+"/sz_filter_passed", u(passed[i]))
 		}
 		k.files[td+"/total_bytes"] = u(total)
 	case "update_schemes_tried_bytes":
@@ -328,10 +376,84 @@ func (k *Kernel) applyScheme(idx int, sdir, cmd string) {
 		k.removeChildren(td)
 		k.files[td+"/total_bytes"] = "0"
 	case "update_schemes_stats":
-
+		if _, ok := k.files[sdir+"/stats/sz_ops_filter_passed"]; ok {
+			k.files[sdir+"/stats/sz_ops_filter_passed"] = u(k.uint(sdir+"/stats/sz_ops_filter_passed") + totalPassed)
+		}
 		k.files[sdir+"/stats/nr_tried"] = u(k.uint(sdir+"/stats/nr_tried") + uint64(len(matched)))
 		k.files[sdir+"/stats/sz_tried"] = u(k.uint(sdir+"/stats/sz_tried") + total)
 	}
+}
+
+func (k *Kernel) filters(sdir string) []filterSpec {
+	dirs := []string{sdir + "/filters"}
+	if k.dirs[sdir+"/core_filters"] {
+		dirs = []string{sdir + "/core_filters", sdir + "/ops_filters"}
+	}
+	var out []filterSpec
+	for _, d := range dirs {
+		for i := range k.count(d + "/nr_filters") {
+			fd := path.Join(d, strconv.Itoa(i))
+			_, hasAllow := k.files[fd+"/allow"]
+			out = append(out, filterSpec{
+				typ:      k.files[fd+"/type"],
+				matching: k.files[fd+"/matching"] == "Y",
+				allow:    k.files[fd+"/allow"] == "Y",
+				hasAllow: hasAllow,
+				memcg:    k.files[fd+"/memcg_path"],
+				start:    k.uint(fd + "/addr_start"),
+				end:      k.uint(fd + "/addr_end"),
+			})
+		}
+	}
+	return out
+}
+
+func (k *Kernel) passedBytes(idx int, r damonfs.Region, filters []filterSpec) uint64 {
+	if len(filters) == 0 {
+		return r.Size()
+	}
+	var sum uint64
+	covered := uint64(0)
+	for _, c := range k.memory[idx] {
+		lo, hi := max(c.Start, r.Start), min(c.End, r.End)
+		if lo >= hi {
+			continue
+		}
+		covered += hi - lo
+		if allowed(filters, c, lo) {
+			sum += hi - lo
+		}
+	}
+	if rest := r.Size() - covered; rest > 0 && allowed(filters, Chunk{}, r.Start) {
+		sum += rest
+	}
+	return sum
+}
+
+func allowed(filters []filterSpec, c Chunk, addr uint64) bool {
+	for _, f := range filters {
+		var is bool
+		switch f.typ {
+		case "memcg":
+			is = c.Memcg == f.memcg
+		case "young":
+			is = c.Young
+		case "addr":
+			is = addr >= f.start && addr < f.end
+		}
+		if is != f.matching {
+			continue
+		}
+		if f.hasAllow {
+			return f.allow
+		}
+		return false
+	}
+	last := filters[len(filters)-1]
+	if last.hasAllow {
+		return !last.allow
+	}
+	return true
 }
 
 func (k *Kernel) inRange(sdir, field string, v uint64) bool {

@@ -39,6 +39,11 @@ prepare)
 	./scripts/config --file "$CFG" \
 		-e DAMON -e DAMON_VADDR -e DAMON_PADDR -e DAMON_SYSFS \
 		--set-str LOCALVERSION "-microsoft-standard-WSL2-damon"
+	# Drivers for physical hardware WSL never sees; skipping them shortens
+	# the build a lot. GPU access in WSL goes through DXGKRNL, which stays.
+	./scripts/config --file "$CFG" \
+		-d DRM_AMDGPU -d DRM_RADEON -d DRM_NOUVEAU -d DRM_I915 \
+		-d INFINIBAND -d WLAN -d SND -d MEDIA_SUPPORT -d BT -d CAN
 	make KCONFIG_CONFIG="$CFG" olddefconfig >/dev/null
 	echo "--- DAMON options now:"
 	grep -E '^(# )?CONFIG_DAMON' "$CFG"

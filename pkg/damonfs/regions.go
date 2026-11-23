@@ -9,9 +9,10 @@ import (
 
 type (
 	Region struct {
-		Start, End uint64
-		NrAccesses uint64
-		Age        uint64
+		Start, End     uint64
+		NrAccesses     uint64
+		Age            uint64
+		SzFilterPassed uint64
 	}
 )
 
@@ -37,6 +38,7 @@ func (k *Kdamond) ReadTriedRegions(i int) ([]Region, error) {
 
 	sort.Ints(idx)
 
+	hasPassed := len(idx) > 0 && k.fs.b.Exists(path.Join(dir, strconv.Itoa(idx[0]), "sz_filter_passed"))
 	regions := make([]Region, 0, len(idx))
 	for _, v := range idx {
 		rd := path.Join(dir, strconv.Itoa(v)) + "/"
@@ -50,6 +52,13 @@ func (k *Kdamond) ReadTriedRegions(i int) ([]Region, error) {
 				return nil, err
 			}
 			*f.dst = val
+		}
+		if hasPassed {
+			val, err := k.fs.readUint(rd + "sz_filter_passed")
+			if err != nil {
+				return nil, err
+			}
+			r.SzFilterPassed = val
 		}
 		regions = append(regions, r)
 	}

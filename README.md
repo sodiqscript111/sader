@@ -4,18 +4,34 @@ A node agent that measures how much memory each container actually touches,
 not only how much it holds, and exports that to Prometheus next to the
 container's request and limit.
 
-**Status:** milestone 3 in progress. `pkg/damonfs` and `cmd/damon-probe` exist
-and pass their tests against an in-memory fake kernel. Nothing has run on a
-real kernel yet.
+**Status:** early. `pkg/damonfs`, the Way 2 engine and `cmd/damon-probe` pass
+their tests against an in-memory fake kernel. Nothing has run on a real kernel
+yet.
+
+## Two ways to measure
+
+- **Way 1, by process** (`vaddr`): watch one program's own memory by PID. Works
+  on older kernels (5.15+) and on any program. Used by the script.
+- **Way 2, by container** (`paddr` + memcg filters): one watcher sees all of the
+  server's memory and counts the touched bytes that belong to each container.
+  It works for gVisor and other sandboxes too. Needs a kernel with DAMOS
+  filter-passed stats (around 6.14+, still to be confirmed on a real kernel).
+  Used by the Kubernetes agent, which falls back to Way 1 on older kernels.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `pkg/damonfs` | Typed wrapper over `/sys/kernel/mm/damon/admin`: slots, configuration, start/stop/commit, tried regions, stats, feature detection |
-| `pkg/damonfs/damonfstest` | In-memory fake of the sysfs tree that behaves like the kernel on writes; lets everything above it be tested on any OS |
-| `cmd/damon-probe` | Smoke test: detects DAMON, then prints one PID's working set every second |
-| `pkg/discovery`, `pkg/sampler`, `cmd/agent`, `deploy/`, `hack/` | Not started |
+| `pkg/damonfs` | Typed wrapper over `/sys/kernel/mm/damon/admin`: slots, configuration, start/stop/commit, filters (both `core_filters`/`ops_filters` and legacy `filters` layouts), tried regions, stats, feature detection |
+| `pkg/damonfs/damonfstest` | In-memory fake kernel: reacts to writes like the kernel, and models memory ownership per cgroup so filter results can be tested on any OS |
+| `pkg/measure/cgroup` | Way 2 engine: one `paddr` watcher, one stat scheme per container, per-container bytes / hot bytes / 1m-5m-1h working set, optional page-level mode |
+| `cmd/damon-probe` | Smoke test for Way 1: detects DAMON, then prints one PID's working set every second |
+| `hack/memhog` | Validation workload: fills N MiB, keeps touching M MiB |
+| `hack/wsl-damon-kernel.sh` | Builds a WSL2 kernel with DAMON switched on |
+
+Planned: `pkg/measure/process` (Way 1), `pkg/discovery` (Docker, Kubernetes,
+Nomad), `pkg/window`, `cmd/sader` (script), `cmd/sader-agent` (DaemonSet),
+`cmd/sader-operator` (recommendations), `deploy/`.
 
 ## Try it on a Linux VM
 

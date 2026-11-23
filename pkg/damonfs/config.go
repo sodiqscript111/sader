@@ -40,6 +40,7 @@ type (
 		Action        Action
 		AccessPattern AccessPattern
 		ApplyInterval time.Duration
+		Filters       []Filter
 	}
 )
 
@@ -149,6 +150,11 @@ func (s Scheme) Validate() error {
 	}
 	if s.ApplyInterval < 0 {
 		return errors.New("damonfs: negative apply interval")
+	}
+	for i, f := range s.Filters {
+		if err := f.Validate(); err != nil {
+			return fmt.Errorf("filter %d: %w", i, err)
+		}
 	}
 	return nil
 }

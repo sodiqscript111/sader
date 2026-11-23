@@ -21,6 +21,7 @@ type (
 		NrTried, SzTried     uint64
 		NrApplied, SzApplied uint64
 		QtExceeds            uint64
+		SzOpsFilterPassed    uint64
 	}
 
 	Features struct {
@@ -28,6 +29,8 @@ type (
 		SchemeApplyInterval bool
 		TriedBytes          bool
 		IntervalsAutoTuning bool
+		FilterLayout        FilterLayout
+		OpsFilterPassed     bool
 	}
 )
 
@@ -137,10 +140,33 @@ func (k *Kdamond) Configure(c Context) error {
 	if err := k.writeTargets(c.Targets); err != nil {
 		return err
 	}
-	if err := k.fs.writeUint(ctx+"/schemes/nr_schemes", uint64(len(c.Schemes))); err != nil {
+	return k.writeSchemes(c.Schemes)
+}
+
+func (k *Kdamond) UpdateSchemes(schemes []Scheme) error {
+	for i, s := range schemes {
+		if err := s.Validate(); err != nil {
+			return fmt.Errorf("scheme %d: %w", i, err)
+		}
+	}
+	if err := k.writeSchemes(schemes); err != nil {
 		return err
 	}
-	for i, s := range c.Schemes {
+	running, err := k.Running()
+	if err != nil {
+		return err
+	}
+	if running {
+		return k.Commit()
+	}
+	return nil
+}
+
+func (k *Kdamond) writeSchemes(schemes []Scheme) error {
+	if err := k.fs.writeUint(k.ctxDir()+"/schemes/nr_schemes", uint64(len(schemes))); err != nil {
+		return err
+	}
+	for i, s := range schemes {
 		if err := k.writeScheme(i, s); err != nil {
 			return err
 		}
@@ -212,7 +238,7 @@ func (k *Kdamond) writeScheme(i int, s Scheme) error {
 			return err
 		}
 	}
-	return nil
+	return k.writeFilters(dir, s.Filters)
 }
 
 func (k *Kdamond) SchemeStats(i int) (SchemeStats, error) {
@@ -231,6 +257,13 @@ func (k *Kdamond) SchemeStats(i int) (SchemeStats, error) {
 			return SchemeStats{}, err
 		}
 		*f.dst = v
+	}
+	if name := dir + "sz_ops_filter_passed"; k.fs.b.Exists(name) {
+		v, err := k.fs.readUint(name)
+		if err != nil {
+			return SchemeStats{}, err
+		}
+		st.SzOpsFilterPassed = v
 	}
 	return st, nil
 }
@@ -254,5 +287,7 @@ func (k *Kdamond) Features() (Features, error) {
 		SchemeApplyInterval: b.Exists(s0 + "/apply_interval_us"),
 		TriedBytes:          b.Exists(s0 + "/tried_regions/total_bytes"),
 		IntervalsAutoTuning: b.Exists(k.ctxDir() + "/monitoring_attrs/intervals/intervals_goal"),
+		FilterLayout:        k.filterLayout(s0),
+		OpsFilterPassed:     b.Exists(s0 + "/stats/sz_ops_filter_passed"),
 	}, nil
 }
