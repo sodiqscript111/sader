@@ -4,12 +4,17 @@
 #   deps    install build tools
 #   prepare fetch the matching Microsoft source and enable DAMON
 #   build   compile the kernel and its modules, pack modules into modules.vhdx
-#   install copy bzImage-damon and modules-damon.vhdx to C:/wsl-kernel/
+#   install copy bzImage-$NAME and modules-$NAME.vhdx to C:/wsl-kernel/
+#
+# By default it builds the version you run now. For a newer one (Way 2 needs
+# 6.14+), pick a tag from github.com/microsoft/WSL2-Linux-Kernel:
+#   TAG=linux-msft-wsl-6.18.58.1 SRC=/usr/src/wsl-damon-6.18 NAME=damon-6.18 \
+#     bash hack/wsl-damon-kernel.sh prepare   (then build, install)
 #
 # Then point %UserProfile%/.wslconfig at them and run `wsl --shutdown`:
 #   [wsl2]
-#   kernel=C:\\wsl-kernel\\bzImage-damon
-#   kernelModules=C:\\wsl-kernel\\modules-damon.vhdx
+#   kernel=C:\\wsl-kernel\\bzImage-<NAME>
+#   kernelModules=C:\\wsl-kernel\\modules-<NAME>.vhdx
 # Undo: delete those two lines and run `wsl --shutdown` again.
 set -euo pipefail
 
@@ -18,6 +23,7 @@ TAG=${TAG:-linux-msft-wsl-$VER}
 SRC=${SRC:-/usr/src/wsl-damon}
 CFG=Microsoft/config-wsl
 OUT=${OUT:-/mnt/c/wsl-kernel}
+NAME=${NAME:-damon}
 
 case "${1:-}" in
 deps)
@@ -63,12 +69,12 @@ build)
 	;;
 install)
 	mkdir -p "$OUT"
-	cp "$SRC/arch/x86/boot/bzImage" "$OUT/bzImage-damon"
-	cp "$SRC/modules.vhdx" "$OUT/modules-damon.vhdx"
+	cp "$SRC/arch/x86/boot/bzImage" "$OUT/bzImage-$NAME"
+	cp "$SRC/modules.vhdx" "$OUT/modules-$NAME.vhdx"
 	ls -lh "$OUT"
 	;;
 *)
-	sed -n '2,13p' "$0"
+	sed -n '2,18p' "$0"
 	exit 2
 	;;
 esac

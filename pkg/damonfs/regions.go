@@ -1,6 +1,7 @@
 package damonfs
 
 import (
+	"fmt"
 	"path"
 	"sort"
 	"strconv"
@@ -24,10 +25,26 @@ func (r Region) Size() uint64 {
 }
 
 func (k *Kdamond) ReadTriedRegions(i int) ([]Region, error) {
+	regions, _, err := k.readTriedRegions(i)
+	return regions, err
+}
+
+func (k *Kdamond) ReadFilteredTriedRegions(i int) ([]Region, error) {
+	regions, hasPassed, err := k.readTriedRegions(i)
+	if err != nil {
+		return nil, err
+	}
+	if len(regions) > 0 && !hasPassed {
+		return nil, fmt.Errorf("%w: tried region sz_filter_passed", ErrUnsupportedFeature)
+	}
+	return regions, nil
+}
+
+func (k *Kdamond) readTriedRegions(i int) ([]Region, bool, error) {
 	dir := k.schemeDir(i) + "/tried_regions"
 	names, err := k.fs.b.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var idx []int
 	for _, n := range names {
@@ -49,20 +66,20 @@ func (k *Kdamond) ReadTriedRegions(i int) ([]Region, error) {
 		}{{"start", &r.Start}, {"end", &r.End}, {"nr_accesses", &r.NrAccesses}, {"age", &r.Age}} {
 			val, err := k.fs.readUint(rd + f.name)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			*f.dst = val
 		}
 		if hasPassed {
 			val, err := k.fs.readUint(rd + "sz_filter_passed")
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			r.SzFilterPassed = val
 		}
 		regions = append(regions, r)
 	}
-	return regions, nil
+	return regions, hasPassed, nil
 }
 
 func (k *Kdamond) SnapshotTriedRegions(i int) ([]Region, error) {

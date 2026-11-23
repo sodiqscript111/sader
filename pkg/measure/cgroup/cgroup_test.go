@@ -130,6 +130,19 @@ func TestOldKernelRefused(t *testing.T) {
 	}
 }
 
+func TestMissingFilterPassedIsAnErrorNotZero(t *testing.T) {
+	k := damonfstest.New().Without("sz_filter_passed")
+	m := newMonitor(t, k, cgroup.DefaultConfig())
+	if err := m.Start([]cgroup.Container{appA, appB}); err != nil {
+		t.Fatal(err)
+	}
+	scenario(k)
+	got, err := m.Sample()
+	if !errors.Is(err, damonfs.ErrUnsupportedFeature) {
+		t.Fatalf("got %+v, %v; want ErrUnsupportedFeature instead of silent zeros", got, err)
+	}
+}
+
 func TestLegacyFilterLayoutWorks(t *testing.T) {
 	k := damonfstest.New().Without("core_filters", "ops_filters")
 	m := newMonitor(t, k, cgroup.DefaultConfig())

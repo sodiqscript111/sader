@@ -365,7 +365,9 @@ func (k *Kernel) applyScheme(idx int, sdir, cmd string) {
 			k.addFile(rd+"/end", u(r.End))
 			k.addFile(rd+"/nr_accesses", u(r.NrAccesses))
 			k.addFile(rd+"/age", u(r.Age))
-			k.addFile(rd+"/sz_filter_passed", u(passed[i]))
+			if !k.omitted("sz_filter_passed") {
+				k.addFile(rd+"/sz_filter_passed", u(passed[i]))
+			}
 		}
 		k.files[td+"/total_bytes"] = u(total)
 	case "update_schemes_tried_bytes":

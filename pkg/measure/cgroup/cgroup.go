@@ -106,7 +106,7 @@ func (m *Monitor) Sample() ([]Usage, error) {
 	aggr := m.cfg.Intervals.Aggr
 	out := make([]Usage, len(m.containers))
 	for i, c := range m.containers {
-		regions, err := m.kd.ReadTriedRegions(i)
+		regions, err := m.kd.ReadFilteredTriedRegions(i)
 		if err != nil {
 			return nil, fmt.Errorf("container %s: %w", c.ID, err)
 		}

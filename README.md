@@ -29,9 +29,26 @@ yet.
 | `hack/memhog` | Validation workload: fills N MiB, keeps touching M MiB |
 | `hack/wsl-damon-kernel.sh` | Builds a WSL2 kernel with DAMON switched on |
 
-Planned: `pkg/measure/process` (Way 1), `pkg/discovery` (Docker, Kubernetes,
-Nomad), `pkg/window`, `cmd/sader` (script), `cmd/sader-agent` (DaemonSet),
+Planned, in order: `pkg/discovery` (Nomad and Docker first, then Kubernetes),
+`cmd/sader-agent` (Prometheus export; Nomad system job, then DaemonSet),
+`pkg/measure/process` (Way 1), `cmd/sader` (script), `pkg/window`,
 `cmd/sader-operator` (recommendations), `deploy/`.
+
+## Known limits
+
+- **Not yet run on a real kernel.** All tests use the fake kernel in
+  `damonfstest`, which only encodes our reading of the kernel docs.
+- **Way 2 sampling cost.** `Sample` lists every tried region for every
+  container: about containers × regions × 5 small file reads per sample (40
+  containers × 10,000 regions ≈ 2 million). `tried_regions/total_bytes` can't
+  replace it because it sums region sizes, not each container's bytes. The
+  cheaper path is the `sz_ops_filter_passed` stat (one read per scheme). Its
+  exact behaviour (cumulative or not, per how many applications) isn't in the
+  docs, so it will be measured on a real kernel before switching.
+- **gVisor is untested.** Way 2 assumes the sandbox's memory is charged to the
+  container's cgroup. Check: run `hack/memhog` under `runsc`.
+- **A wrong cgroup path reads as 0.** The kernel filter matches nothing, so
+  discovery must only pass paths that exist.
 
 ## Try it on a Linux VM
 
