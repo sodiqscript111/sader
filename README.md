@@ -46,6 +46,19 @@ WSL2, Microsoft kernel 6.18.58.1 built with DAMON (`hack/wsl-damon-kernel.sh`),
 | Way 2, cgroup A | 200 MiB | ~175 MiB (-12%) | memory.current 1032 MiB | 1.01 GiB |
 | Way 2, cgroup B | 100 MiB | ~97 MiB (-3%) | memory.current 1032 MiB | 1.01 GiB |
 
+**gVisor** (`runsc` release-20261116.0, systrap platform, `hack/realtest.sh gvisor`,
+memhog 1 GiB filled / 200 MiB touched):
+
+| Test | sader | Notes |
+|---|---|---|
+| Sandbox cgroup holds | 1.06 GiB seen vs memory.current 1089 MiB | gVisor's memory is charged to the sandbox's cgroup |
+| Way 2 on that cgroup | ~130-170 MiB hot, noisy in the first ~10s | works; less accurate than for a plain process |
+| Way 1 on one systrap helper process | ~197-201 MiB hot | most accurate; the helpers share the app's address space |
+
+`runsc do` puts the sandbox in a new cgroup (`/runsc-<id>`), not the caller's;
+under containerd/Docker/Nomad the runtime passes the container's cgroup
+instead. KVM platform is untested (no `/dev/kvm` in WSL).
+
 Learned on the real kernel (the fake kernel now models both):
 
 - A `paddr` target with no address ranges watches nothing and reports nothing.
@@ -66,8 +79,7 @@ Learned on the real kernel (the fake kernel now models both):
   cheaper path is the `sz_ops_filter_passed` stat (one read per scheme). Its
   exact behaviour (cumulative or not, per how many applications) isn't in the
   docs, so it will be measured on a real kernel before switching.
-- **gVisor is untested.** Way 2 assumes the sandbox's memory is charged to the
-  container's cgroup. Check: run `hack/memhog` under `runsc`.
+- **gVisor: systrap tested, KVM not.** See the results above.
 - **A wrong cgroup path reads as 0.** The kernel filter matches nothing, so
   discovery must only pass paths that exist.
 
