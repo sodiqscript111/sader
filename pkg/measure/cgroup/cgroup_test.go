@@ -3,6 +3,8 @@ package cgroup_test
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +23,9 @@ func newMonitor(t *testing.T, k *damonfstest.Kernel, cfg cgroup.Config) *cgroup.
 	f := damonfs.New(k)
 	if err := f.Reserve(1); err != nil {
 		t.Fatal(err)
+	}
+	if len(cfg.Regions) == 0 {
+		cfg.Regions = []damonfs.AddrRange{{Start: 0, End: 1 << 40}}
 	}
 	return cgroup.New(f.Kdamond(0), cfg)
 }
@@ -123,6 +128,38 @@ func TestStartWithNoContainers(t *testing.T) {
 	}
 	if err := m.SetContainers([]cgroup.Container{appA}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStartWithoutRegionsRefused(t *testing.T) {
+	k := damonfstest.New()
+	f := damonfs.New(k)
+	if err := f.Reserve(1); err != nil {
+		t.Fatal(err)
+	}
+	m := cgroup.New(f.Kdamond(0), cgroup.DefaultConfig())
+	if err := m.Start([]cgroup.Container{appA}); !errors.Is(err, cgroup.ErrNoRegions) {
+		t.Fatalf("got %v, want ErrNoRegions", err)
+	}
+}
+
+func TestParseSystemRAM(t *testing.T) {
+	iomem := `00000000-00000fff : Reserved
+00001000-0009ffff : System RAM
+00200000-f7ffffff : System RAM
+  01000000-01ffffff : Kernel code
+100000000-2055fffff : System RAM
+`
+	got, err := cgroup.ParseSystemRAM(strings.NewReader(iomem))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []damonfs.AddrRange{{Start: 0x1000, End: 0xa0000}, {Start: 0x200000, End: 0xf8000000}, {Start: 0x100000000, End: 0x205600000}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %#v", got)
+	}
+	if _, err := cgroup.ParseSystemRAM(strings.NewReader("00000000-00000000 : System RAM\n")); err == nil {
+		t.Fatal("zeroed iomem (non-root read) accepted")
 	}
 }
 

@@ -342,6 +342,10 @@ func (k *Kernel) startable(kdir string) bool {
 
 func (k *Kernel) applyScheme(idx int, sdir, cmd string) {
 	var matched []damonfs.Region
+	ctx := path.Dir(path.Dir(sdir))
+	if k.files[ctx+"/operations"] == "paddr" && k.count(ctx+"/targets/0/regions/nr_regions") == 0 {
+		k.regions[idx] = nil
+	}
 	for _, r := range k.regions[idx] {
 		if k.inRange(sdir, "sz", r.Size()) && k.inRange(sdir, "nr_accesses", r.NrAccesses) && k.inRange(sdir, "age", r.Age) {
 			matched = append(matched, r)

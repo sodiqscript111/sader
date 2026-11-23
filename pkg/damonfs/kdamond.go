@@ -201,11 +201,26 @@ func (k *Kdamond) writeTargets(ts []Target) error {
 		return err
 	}
 	for i, t := range ts {
-		if t.PID <= 0 {
+		td := path.Join(dir, strconv.Itoa(i))
+		if t.PID > 0 {
+			if err := k.fs.writeUint(td+"/pid_target", uint64(t.PID)); err != nil {
+				return err
+			}
+		}
+		if len(t.Regions) == 0 {
 			continue
 		}
-		if err := k.fs.writeUint(path.Join(dir, strconv.Itoa(i), "pid_target"), uint64(t.PID)); err != nil {
+		if err := k.fs.writeUint(td+"/regions/nr_regions", uint64(len(t.Regions))); err != nil {
 			return err
+		}
+		for j, r := range t.Regions {
+			rd := path.Join(td, "regions", strconv.Itoa(j))
+			if err := k.fs.writeUint(rd+"/start", r.Start); err != nil {
+				return err
+			}
+			if err := k.fs.writeUint(rd+"/end", r.End); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

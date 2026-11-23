@@ -30,7 +30,7 @@ deps)
 	export DEBIAN_FRONTEND=noninteractive
 	dpkg --configure -a
 	apt-get update -qq
-	apt-get install -y -qq build-essential flex bison dwarves libssl-dev libelf-dev cpio bc python3 git qemu-utils kmod
+	apt-get install -y -qq build-essential flex bison dwarves libssl-dev libelf-dev cpio bc python3 git qemu-utils kmod rsync
 	for c in gcc make flex bison pahole bc git qemu-img; do
 		command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 1; }
 	done
@@ -60,10 +60,22 @@ build)
 	# Docker needs bridge and iptables, which this config builds as modules,
 	# so build and pack the modules too (same steps as Microsoft's README).
 	time make KCONFIG_CONFIG="$CFG" -j"$(nproc)"
+	"$0" package
+	;;
+package)
+	cd "$SRC"
 	rel=$(make -s KCONFIG_CONFIG="$CFG" kernelrelease)
-	rm -rf modules modules.vhdx
+	rm -rf modules headers perf modules.vhdx
 	make KCONFIG_CONFIG="$CFG" INSTALL_MOD_PATH="$PWD/modules" modules_install >/dev/null
-	./Microsoft/scripts/gen_modules_vhdx.sh "$PWD/modules" "$rel" modules.vhdx
+	if [ -x Microsoft/scripts/gen_artifacts_vhdx.sh ]; then
+		# 6.18+: one VHDX holding modules, UAPI headers and perf. perf is
+		# optional tooling and slow to build, so ship an empty folder.
+		make KCONFIG_CONFIG="$CFG" headers_install INSTALL_HDR_PATH="$PWD/headers" >/dev/null
+		mkdir -p perf
+		./Microsoft/scripts/gen_artifacts_vhdx.sh "$PWD/modules" "$PWD/headers" "$PWD/perf" "$rel" modules.vhdx
+	else
+		./Microsoft/scripts/gen_modules_vhdx.sh "$PWD/modules" "$rel" modules.vhdx
+	fi
 	echo "kernel release: $rel"
 	ls -lh arch/x86/boot/bzImage modules.vhdx
 	;;

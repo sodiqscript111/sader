@@ -18,7 +18,12 @@ type (
 
 	Range struct{ Min, Max uint64 }
 
-	Target struct{ PID int }
+	Target struct {
+		PID     int
+		Regions []AddrRange
+	}
+
+	AddrRange struct{ Start, End uint64 }
 
 	Context struct {
 		Operations Operations
@@ -93,6 +98,16 @@ func (c Context) Validate() error {
 func validateTargets(ops Operations, ts []Target) error {
 	if len(ts) == 0 {
 		return errors.New("damonfs: at least one target is required")
+	}
+	for _, t := range ts {
+		for i, r := range t.Regions {
+			if r.Start >= r.End {
+				return fmt.Errorf("damonfs: region %d start %#x must be below end %#x", i, r.Start, r.End)
+			}
+			if i > 0 && r.Start < t.Regions[i-1].End {
+				return fmt.Errorf("damonfs: region %d overlaps or is out of order", i)
+			}
+		}
 	}
 	if !ops.needsPID() {
 		return nil

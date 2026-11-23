@@ -18,9 +18,11 @@ func main() {
 	pid := flag.Int("pid", 0, "monitor this PID and print its working set")
 	interval := flag.Duration("interval", time.Second, "time between samples")
 	count := flag.Int("count", 10, "number of samples; 0 runs until interrupted")
+	cgroups := flag.String("cgroups", "", "comma-separated cgroup paths to measure with Way 2, e.g. /a,/b")
+	pageLevel := flag.Bool("page-level", false, "Way 2: count touched memory page by page")
 	flag.Parse()
 
-	if err := run(*root, *pid, *interval, *count); err != nil {
+	if err := run(*root, *pid, *cgroups, *pageLevel, *interval, *count); err != nil {
 		fmt.Fprintln(os.Stderr, "damon-probe:", err)
 		if errors.Is(err, damonfs.ErrNotSupported) {
 			os.Exit(2)
@@ -29,7 +31,7 @@ func main() {
 	}
 }
 
-func run(root string, pid int, interval time.Duration, count int) error {
+func run(root string, pid int, cgroups string, pageLevel bool, interval time.Duration, count int) error {
 	fsys, err := damonfs.Open(root)
 	if err != nil {
 		return err
@@ -45,10 +47,13 @@ func run(root string, pid int, interval time.Duration, count int) error {
 		p, _ := kd.PID()
 		fmt.Printf("  kdamond %d: state=%s pid=%d\n", i, st, p)
 		if st == damonfs.StateOn {
-			if pid != 0 {
+			if pid != 0 || cgroups != "" {
 				return fmt.Errorf("kdamond %d is running (damo or another agent?); stop it first", i)
 			}
 		}
+	}
+	if cgroups != "" {
+		return runCgroups(fsys, n, cgroups, pageLevel, interval, count)
 	}
 	if pid == 0 {
 		return nil

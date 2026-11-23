@@ -21,6 +21,7 @@ type (
 		NrRegions damonfs.Range
 		Windows   []time.Duration
 		PageLevel bool
+		Regions   []damonfs.AddrRange
 	}
 
 	Usage struct {
@@ -37,7 +38,10 @@ type (
 	}
 )
 
-var ErrKernelTooOld = errors.New("cgroup: kernel lacks DAMOS filter-passed stats needed for per-container measurement")
+var (
+	ErrKernelTooOld = errors.New("cgroup: kernel lacks DAMOS filter-passed stats needed for per-container measurement")
+	ErrNoRegions    = errors.New("cgroup: no physical memory ranges to watch; set Config.Regions, e.g. from ReadSystemRAM")
+)
 
 func DefaultConfig() Config {
 	return Config{
@@ -55,12 +59,15 @@ func (m *Monitor) Start(cs []Container) error {
 	if err := validate(cs); err != nil {
 		return err
 	}
+	if len(m.cfg.Regions) == 0 {
+		return ErrNoRegions
+	}
 	m.containers = slices.Clone(cs)
 	ctx := damonfs.Context{
 		Operations: damonfs.OpsPaddr,
 		Intervals:  m.cfg.Intervals,
 		NrRegions:  m.cfg.NrRegions,
-		Targets:    []damonfs.Target{{}},
+		Targets:    []damonfs.Target{{Regions: m.cfg.Regions}},
 		Schemes:    m.schemes(),
 	}
 	if len(ctx.Schemes) == 0 {

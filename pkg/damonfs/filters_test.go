@@ -13,7 +13,7 @@ func paddrContext(schemes ...damonfs.Scheme) damonfs.Context {
 		Operations: damonfs.OpsPaddr,
 		Intervals:  damonfs.DefaultIntervals,
 		NrRegions:  damonfs.DefaultNrRegions,
-		Targets:    []damonfs.Target{{}},
+		Targets:    []damonfs.Target{{Regions: []damonfs.AddrRange{{Start: 0, End: 1 << 40}}}},
 		Schemes:    schemes,
 	}
 }

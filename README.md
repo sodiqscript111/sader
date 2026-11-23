@@ -35,10 +35,30 @@ Planned, in order: `pkg/discovery` (Nomad and Docker first, then Kubernetes),
 `pkg/measure/process` (Way 1), `cmd/sader` (script), `pkg/window`,
 `cmd/sader-operator` (recommendations), `deploy/`.
 
+## First real-kernel results
+
+WSL2, Microsoft kernel 6.18.58.1 built with DAMON (`hack/wsl-damon-kernel.sh`),
+`hack/realtest.sh`. Each memhog fills 1 GiB and keeps touching part of it.
+
+| Test | Really touched | sader (hot, after ~10s) | Holds | sader "seen" |
+|---|---|---|---|---|
+| Way 1, one process | 200 MiB | ~175 MiB (-12%) | RSS 1031 MiB | n/a |
+| Way 2, cgroup A | 200 MiB | ~175 MiB (-12%) | memory.current 1032 MiB | 1.01 GiB |
+| Way 2, cgroup B | 100 MiB | ~97 MiB (-3%) | memory.current 1032 MiB | 1.01 GiB |
+
+Learned on the real kernel (the fake kernel now models both):
+
+- A `paddr` target with no address ranges watches nothing and reports nothing.
+  Way 2 now reads System RAM ranges from `/proc/iomem` and refuses to start
+  without them.
+- The 1m/5m/1h windows are only meaningful after the watcher has run that long;
+  before that every region looks recently used. A warm-up rule is still to do.
+
 ## Known limits
 
-- **Not yet run on a real kernel.** All tests use the fake kernel in
-  `damonfstest`, which only encodes our reading of the kernel docs.
+- **Only a first real-kernel run so far.** Most tests still use the fake kernel
+  in `damonfstest`, which encodes our reading of the kernel docs plus what the
+  real runs above showed.
 - **Way 2 sampling cost.** `Sample` lists every tried region for every
   container: about containers × regions × 5 small file reads per sample (40
   containers × 10,000 regions ≈ 2 million). `tried_regions/total_bytes` can't
